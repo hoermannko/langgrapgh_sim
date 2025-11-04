@@ -16,13 +16,15 @@ from typing import Dict, List, Literal
 import numpy as np
 import pybullet as p
 import pybullet_data
-
+import dotenv
+dotenv.load_dotenv()
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
+)
 
 from langgraph.graph import END, START, StateGraph
 
