@@ -63,6 +63,7 @@ class BulletSimulation:
         self._yaw = 0.0
         self._heading_marker_id: int | None = None
         self._vision_llm: Optional[AzureChatOpenAI] = None
+        self._last_detected_target: Optional[str] = None
 
         self._time_step = 1.0 / 120.0
         p.setTimeStep(self._time_step)
@@ -220,8 +221,18 @@ class BulletSimulation:
 
         if step_distance <= 0:
             raise ValueError("step_distance must be positive")
-        summary = self.move_direction("forward", step_distance)
-        return summary + f"\nForward step size: {step_distance:.2f}m."
+        summaries: List[str] = []
+
+        if self._last_detected_target:
+            alignment_msg = self._align_heading_to_target(self._last_detected_target)
+            if alignment_msg:
+                summaries.append(alignment_msg)
+
+        movement_summary = self.move_direction("forward", step_distance)
+        summaries.append(movement_summary)
+        summaries.append(f"Forward step size: {step_distance:.2f}m.")
+
+        return "\n".join(summaries)
 
     def turn(self, angle_degrees: float) -> str:
         self._yaw += math.radians(angle_degrees)
@@ -412,7 +423,50 @@ class BulletSimulation:
             f"Vision model assessment for '{target_object}': {detection_text.strip()}"
         )
 
+        stripped_detection = detection_text.strip()
+        decision_line = (
+            stripped_detection.splitlines()[0].strip().lower()
+            if stripped_detection
+            else ""
+        )
+        if decision_line.startswith("yes"):
+            self._last_detected_target = target_object.strip().lower()
+        else:
+            self._last_detected_target = None
+
         return "\n".join(summary_lines)
+
+    def _resolve_target_position(self, target_object: str) -> np.ndarray:
+        name = target_object.strip().lower()
+        if not name:
+            raise ValueError("Target object name is empty")
+
+        if name.endswith("ball"):
+            color = name.split()[0]
+            return self.get_ball_position(color)
+
+        if name == "blue cube":
+            return self.get_blue_cube_position()
+
+        raise ValueError(f"Unsupported target object '{target_object}'")
+
+    def get_blue_cube_position(self) -> np.ndarray:
+        position, _ = p.getBasePositionAndOrientation(self.blue_cube_id)
+        return np.array(position)
+
+    def _align_heading_to_target(self, target_object: str) -> Optional[str]:
+        try:
+            target_position = self._resolve_target_position(target_object)
+        except ValueError:
+            return None
+
+        desired_angle = self._angle_to_ball(target_position)
+        angle_diff = self._normalize_angle(desired_angle - self._yaw)
+        if abs(math.degrees(angle_diff)) < 2.0:
+            return None
+
+        turn_result = self.turn(math.degrees(angle_diff))
+        return f"Alignment adjustment before moving: {turn_result}"
 
     def close(self) -> None:
         p.disconnect()
