@@ -7,8 +7,9 @@ LangGraph agent plans and executes goals such as moving a cube-shaped robot towa
 ## Features
 
 - PyBullet environment containing a plane, a cube robot, and two spheres (red and blue).
-- LangGraph planning loop with planner, executor, and evaluator nodes.
-- LangChain `PromptTemplate` used to summarize the generated plan.
+- LangGraph planning loop powered by an Azure OpenAI chat model.
+- Tool-enabled agent that can move, turn, and evaluate the simulated scene through
+  registered LangChain tools.
 - Interactive CLI: provide goals like "approach the red ball" and observe the agent's progress.
 
 ## Setup
@@ -24,15 +25,23 @@ pip install langgraph langchain pybullet numpy
 
 ## Running the simulation
 
-```bash
-python main.py
-```
-
-Pass `--gui` to launch the PyBullet GUI (if your environment supports it):
+Before running the simulation, export the Azure OpenAI environment variables so the
+agent can reach your deployment:
 
 ```bash
-python main.py --gui
+export OPENAI_API_KEY="<your-azure-openai-key>"
+export OPENAI_API_VERSION="<api-version>"
+export AZURE_OPENAI_ENDPOINT="https://<your-resource-name>.openai.azure.com"
+export OPENAI_MODEL_NAME="<deployment-name>"
 ```
+
+Then start the simulator:
+
+```bash
+python main.py        # add --gui if you want the PyBullet GUI
+```
+
+Pass `--gui` to launch the PyBullet GUI (if your environment supports it).
 
 Once the program starts you can type instructions such as:
 
