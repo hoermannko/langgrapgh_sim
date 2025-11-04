@@ -12,7 +12,7 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal
+from typing import Dict, List
 
 import numpy as np
 import pybullet as p
@@ -208,6 +208,14 @@ class BulletSimulation:
         delta = np.array([math.cos(heading), math.sin(heading), 0.0]) * distance
         return self.move_relative(delta)
 
+    def move_forward(self, step_distance: float = 0.5) -> str:
+        """Advance the robot forward by a fixed step."""
+
+        if step_distance <= 0:
+            raise ValueError("step_distance must be positive")
+        summary = self.move_direction("forward", step_distance)
+        return summary + f"\nForward step size: {step_distance:.2f}m."
+
     def turn(self, angle_degrees: float) -> str:
         self._yaw += math.radians(angle_degrees)
         # Normalize yaw to [-pi, pi]
@@ -231,6 +239,59 @@ class BulletSimulation:
                 f"{color.title()} ball at {ball_pos_arr.round(3).tolist()} (distance {distance:.2f}m)"
             )
         return "; ".join(details)
+
+    def _angle_to_ball(self, ball_position: np.ndarray) -> float:
+        robot_pos = self.get_robot_position()
+        delta = ball_position[:2] - robot_pos[:2]
+        return math.atan2(delta[1], delta[0])
+
+    @staticmethod
+    def _normalize_angle(angle: float) -> float:
+        return (angle + math.pi) % (2 * math.pi) - math.pi
+
+    def capture_and_detect(self, fov_degrees: float = 60.0) -> str:
+        """Capture a virtual camera image and report visible balls."""
+
+        robot_pos = self.get_robot_position()
+        summary_lines = [
+            "Camera snapshot captured.",
+            f"Robot at {robot_pos.round(3).tolist()} facing {math.degrees(self._yaw):.1f}°.",
+        ]
+
+        fov_radians = math.radians(max(min(fov_degrees, 180.0), 1.0))
+        half_fov = fov_radians / 2
+        detected: List[str] = []
+
+        for color, body_id in self.balls.items():
+            ball_pos, _ = p.getBasePositionAndOrientation(body_id)
+            ball_arr = np.array(ball_pos)
+            distance = float(np.linalg.norm(ball_arr[:2] - robot_pos[:2]))
+            bearing = self._angle_to_ball(ball_arr)
+            relative = self._normalize_angle(bearing - self._yaw)
+
+            if abs(relative) <= half_fov:
+                detected.append(color)
+                visibility_note = (
+                    " within reach!" if distance < 0.2 else ""
+                )
+                summary_lines.append(
+                    f"{color.title()} ball detected at distance {distance:.2f}m (bearing {math.degrees(relative):.1f}°){visibility_note}."
+                )
+            else:
+                summary_lines.append(
+                    f"{color.title()} ball outside view (distance {distance:.2f}m, bearing {math.degrees(relative):.1f}°)."
+                )
+
+        if not detected:
+            summary_lines.append(
+                "No balls currently visible. Consider turning to search for the target."
+            )
+        else:
+            summary_lines.append(
+                "Visible balls detected. Move forward to reduce the distance to the desired target."
+            )
+
+        return "\n".join(summary_lines)
 
     def close(self) -> None:
         p.disconnect()
@@ -262,10 +323,10 @@ def create_llm() -> AzureChatOpenAI:
 
 def build_tools(sim: BulletSimulation):
     @tool
-    def move(direction: Literal["forward", "backward", "left", "right"], distance: float) -> str:
-        """Move the robot in the given direction by ``distance`` meters."""
+    def move_forward() -> str:
+        """Move the robot 0.5m forward along its current heading."""
 
-        return sim.move_direction(direction, distance)
+        return sim.move_forward(0.5)
 
     @tool
     def turn(angle_degrees: float) -> str:
@@ -274,12 +335,12 @@ def build_tools(sim: BulletSimulation):
         return sim.turn(angle_degrees)
 
     @tool
-    def evaluate_scene_image() -> str:
-        """Provide a textual evaluation of the current simulated camera image."""
+    def capture_and_detect_image() -> str:
+        """Capture a camera image and report which balls are visible."""
 
-        return sim.evaluate_scene()
+        return sim.capture_and_detect()
 
-    return [move, turn, evaluate_scene_image]
+    return [move_forward, turn, capture_and_detect_image]
 
 
 def build_agent(sim: BulletSimulation):
@@ -291,9 +352,13 @@ def build_agent(sim: BulletSimulation):
     system_message = SystemMessage(
         content=(
             "You control a cube robot in a PyBullet world containing red and blue balls. "
-            "Use the available tools to move, rotate, and analyze the scene so that you can "
-            "reach goals provided by the user. Respond with clear, concise updates when the "
-            "goal is satisfied."
+            "Only three tools are available: ``turn`` (rotate by a degree value), ``move_forward`` "
+            "(advance exactly 0.5m), and ``capture_and_detect_image`` (take a camera snapshot "
+            "and report which balls are visible). When asked to approach a specific ball, first "
+            "capture images until the desired ball is visible. If it is not visible, continue "
+            "turning in place. Once the target ball enters the camera frame, alternate between "
+            "capturing images and moving forward until the robot is very close (distance below "
+            "0.2m). Provide concise progress updates throughout."
         )
     )
 
