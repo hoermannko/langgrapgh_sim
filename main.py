@@ -7,17 +7,19 @@ high-level goals provided by the user via the command line.
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
 import math
 import os
 import time
-from collections import Counter
 from dataclasses import dataclass, field
+from io import BytesIO
 from typing import Dict, List, Optional
 
 import numpy as np
 import pybullet as p
 import pybullet_data
+from PIL import Image
 import dotenv
 dotenv.load_dotenv()
 from langchain_core.messages import (
@@ -280,29 +282,6 @@ class BulletSimulation:
         self._vision_llm = llm
 
     @staticmethod
-    def _color_label(rgb: np.ndarray) -> str:
-        r, g, b = rgb
-        max_val = max(r, g, b)
-        min_val = min(r, g, b)
-        if max_val < 50:
-            return "K"  # Dark / background
-        if min_val > 200:
-            return "W"  # Bright / white
-        if r > g + 50 and r > b + 50:
-            return "R"
-        if b > r + 50 and b > g + 50:
-            return "B"
-        if g > r + 50 and g > b + 50:
-            return "G"
-        if r + g > 420 and b < 160:
-            return "Y"
-        if b > 160 and g > 160 and r < 140:
-            return "C"
-        if r > 160 and b > 160 and g < 140:
-            return "M"
-        return "O"
-
-    @staticmethod
     def _depth_buffer_to_meters(depth_buffer: np.ndarray, near: float, far: float) -> np.ndarray:
         return (2.0 * near * far) / (
             far + near - (2.0 * depth_buffer - 1.0) * (far - near)
@@ -352,24 +331,12 @@ class BulletSimulation:
         depth_buffer = np.array(depth_data, dtype=np.float32).reshape(height, width)
         depth_meters = self._depth_buffer_to_meters(depth_buffer, near_val, far_val)
 
-        grid_size = 8
-        block_h = height // grid_size
-        block_w = width // grid_size
-        trimmed_rgb = rgb_array[
-            : grid_size * block_h, : grid_size * block_w
-        ]
-        block_means = trimmed_rgb.reshape(
-            grid_size, block_h, grid_size, block_w, 3
-        ).mean(axis=(1, 3))
-        label_grid = [
-            [self._color_label(block_means[row, col]) for col in range(grid_size)]
-            for row in range(grid_size)
-        ]
-        grid_lines = ["".join(row) for row in label_grid]
-        label_counts = Counter(label for row in label_grid for label in row)
-        counts_summary = ", ".join(
-            f"{label}:{count}" for label, count in sorted(label_counts.items())
-        )
+        image = Image.fromarray(rgb_array)
+        with BytesIO() as buffer:
+            image.save(buffer, format="PNG")
+            image_bytes = buffer.getvalue()
+        image_b64 = base64.b64encode(image_bytes).decode("ascii")
+        image_data_url = f"data:image/png;base64,{image_b64}"
 
         summary_lines = [
             "Camera snapshot captured via RGB-D sensor.",
@@ -381,13 +348,8 @@ class BulletSimulation:
                 "Scene objects include red and blue balls plus a blue cube. "
                 "All decisions must rely on the camera output."
             ),
-            "Color grid (legend: R=red, B=blue, G=green, C=cyan, M=magenta, Y=yellow, "
-            "W=bright, K=dark, O=other):",
         ]
-        summary_lines.extend(f"   {line}" for line in grid_lines)
-        summary_lines.append(
-            f"Color counts: {counts_summary if counts_summary else 'none'}"
-        )
+        summary_lines.append("RGB image transmitted to vision model for analysis.")
 
         finite_depth = depth_meters[np.isfinite(depth_meters)]
         if finite_depth.size:
@@ -414,18 +376,11 @@ class BulletSimulation:
             )
             return "\n".join(summary_lines)
 
-        grid_text = "\n".join(grid_lines)
-        counts_text = counts_summary if counts_summary else "none"
-        detection_prompt = (
-            "You analyze a coarse color grid derived from a robot-mounted camera. "
-            "Determine whether the specified target object is visible. Respond with "
-            "'yes', 'no', or 'uncertain' on the first line, followed by a brief "
-            "justification."
+        detection_text_prompt = (
+            "You are a concise vision classifier operating on a simulated robot RGB camera feed. "
+            "Determine whether the specified target object is visible. Respond with 'yes', 'no', "
+            "or 'uncertain' on the first line, followed by a brief justification."
             f"\nTarget object: {target_object}."
-            "\nGrid legend: R=red, B=blue, G=green, C=cyan, M=magenta, Y=yellow, W=bright, K=dark, O=other."
-            f"\nColor counts: {counts_text}."
-            "\nGrid (top row = left-to-right across the forward view):\n"
-            f"{grid_text}"
         )
 
         try:
@@ -434,10 +389,15 @@ class BulletSimulation:
                     SystemMessage(
                         content=(
                             "You are a concise vision classifier. Decide if the target object is visible "
-                            "based on the provided color grid and counts."
+                            "based on the provided simulated RGB image."
                         )
                     ),
-                    HumanMessage(content=detection_prompt),
+                    HumanMessage(
+                        content=[
+                            {"type": "text", "text": detection_text_prompt},
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                        ]
+                    ),
                 ]
             )
             detection_text = (
