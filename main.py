@@ -14,12 +14,15 @@ from typing import Dict, List, Optional
 import numpy as np
 import pybullet as p
 import pybullet_data
-from langchain.prompts import PromptTemplate
 from langgraph.graph import END, START, StateGraph
 
 
-PLAN_TEMPLATE = PromptTemplate.from_template(
-    "Goal: {goal}\nTarget: {target}\nPlan:\n1. Identify the {target} ball\n2. Move to the {target} ball"
+PLAN_TEMPLATE = (
+    "Goal: {goal}\n"
+    "Target: {target}\n"
+    "Plan:\n"
+    "1. Identify the {target} ball\n"
+    "2. Move to the {target} ball"
 )
 
 
