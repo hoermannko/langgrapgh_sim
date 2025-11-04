@@ -11,8 +11,9 @@ import logging
 import math
 import os
 import time
+from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pybullet as p
@@ -56,8 +57,10 @@ class BulletSimulation:
         self._plane_id = p.loadURDF("plane.urdf")
         self.robot_id = self._create_robot()
         self.balls = self._create_balls()
+        self.blue_cube_id = self._create_blue_cube()
         self._yaw = 0.0
         self._heading_marker_id: int | None = None
+        self._vision_llm: Optional[AzureChatOpenAI] = None
 
         self._time_step = 1.0 / 120.0
         p.setTimeStep(self._time_step)
@@ -103,6 +106,25 @@ class BulletSimulation:
 
         return balls
 
+    def _create_blue_cube(self) -> int:
+        half_extents = [0.1, 0.1, 0.1]
+        collision_shape = p.createCollisionShape(
+            p.GEOM_BOX, halfExtents=half_extents
+        )
+        visual_shape = p.createVisualShape(
+            p.GEOM_BOX,
+            halfExtents=half_extents,
+            rgbaColor=[0.2, 0.2, 0.95, 1.0],
+        )
+        position = [0.6, 1.2, half_extents[2]]
+        cube = p.createMultiBody(
+            baseMass=0.2,
+            baseCollisionShapeIndex=collision_shape,
+            baseVisualShapeIndex=visual_shape,
+            basePosition=position,
+        )
+        return cube
+
     def get_robot_position(self) -> np.ndarray:
         position, _ = p.getBasePositionAndOrientation(self.robot_id)
         return np.array(position)
@@ -118,32 +140,22 @@ class BulletSimulation:
         target: np.ndarray,
         tolerance: float = 0.05,
         step_distance: float = 0.1,
-    ) -> tuple[bool, List[str]]:
-        """Move the robot towards ``target`` in fixed increments.
-
-        The robot advances a fixed planar distance on every iteration and performs a
-        scene evaluation after each move to determine whether the goal position has
-        been reached.
-        """
+    ) -> bool:
+        """Move the robot towards ``target`` in fixed increments."""
 
         if step_distance <= 0:
             raise ValueError("step_distance must be positive")
 
         max_steps = 600
-        evaluations: List[str] = []
 
-        for step_index in range(1, max_steps + 1):
+        for _ in range(1, max_steps + 1):
             current = self.get_robot_position()
             delta = target - current
             planar_delta = delta[:2]
             distance = np.linalg.norm(planar_delta)
 
             if distance < tolerance:
-                evaluations.append(
-                    f"Step {step_index}: Goal already satisfied. {self.evaluate_scene()}"
-                )
-                evaluations.append("Task completed successfully: target reached.")
-                return True, evaluations
+                return True
 
             direction = planar_delta / max(distance, 1e-6)
             travel = min(step_distance, distance)
@@ -162,30 +174,22 @@ class BulletSimulation:
             if self._use_gui:
                 time.sleep(self._time_step)
 
-            # Evaluate the scene after each discrete movement.
-            evaluation = self.evaluate_scene()
             remaining = np.linalg.norm((target - new_position)[:2])
 
             if remaining < tolerance:
-                evaluations.append("Task completed successfully: target reached.")
-                return True, evaluations
+                return True
 
-        evaluations.append(
-            f"Movement halted after {max_steps} steps without reaching the target."
-        )
-        return False, evaluations
+        return False
 
     def move_relative(self, delta: np.ndarray) -> str:
         current = self.get_robot_position()
         target = current + np.array([delta[0], delta[1], 0.0])
-        arrived, evaluations = self.move_robot_towards(target)
-        summary_lines = []
+        arrived = self.move_robot_towards(target)
         if arrived:
-            summary_lines.append(f"Moved to {target.round(3).tolist()}")
-        else:
-            summary_lines.append("Movement incomplete within allotted steps")
-        summary_lines.extend(evaluations)
-        return "\n".join(summary_lines)
+            return "Movement command executed. Capture a new camera image to assess surroundings."
+        return (
+            "Movement halted before reaching the requested offset. Capture a camera image to reassess."
+        )
 
     def move_direction(self, direction: str, distance: float) -> str:
         if distance <= 0:
@@ -270,47 +274,183 @@ class BulletSimulation:
             lifeTime=0.0,
         )
 
-    def capture_and_detect(self, fov_degrees: float = 60.0) -> str:
-        """Capture a virtual camera image and report visible balls."""
+    def set_detection_llm(self, llm: AzureChatOpenAI) -> None:
+        """Configure the language model used for vision-based detection."""
+
+        self._vision_llm = llm
+
+    @staticmethod
+    def _color_label(rgb: np.ndarray) -> str:
+        r, g, b = rgb
+        max_val = max(r, g, b)
+        min_val = min(r, g, b)
+        if max_val < 50:
+            return "K"  # Dark / background
+        if min_val > 200:
+            return "W"  # Bright / white
+        if r > g + 50 and r > b + 50:
+            return "R"
+        if b > r + 50 and b > g + 50:
+            return "B"
+        if g > r + 50 and g > b + 50:
+            return "G"
+        if r + g > 420 and b < 160:
+            return "Y"
+        if b > 160 and g > 160 and r < 140:
+            return "C"
+        if r > 160 and b > 160 and g < 140:
+            return "M"
+        return "O"
+
+    @staticmethod
+    def _depth_buffer_to_meters(depth_buffer: np.ndarray, near: float, far: float) -> np.ndarray:
+        return (2.0 * near * far) / (
+            far + near - (2.0 * depth_buffer - 1.0) * (far - near)
+        )
+
+    def capture_and_detect(
+        self, target_object: Optional[str] = None, fov_degrees: float = 60.0
+    ) -> str:
+        """Capture a virtual camera image and use an LLM to judge target visibility."""
 
         robot_pos = self.get_robot_position()
-        summary_lines = [
-            "Camera snapshot captured.",
-            f"Robot at {robot_pos.round(3).tolist()} facing {math.degrees(self._yaw):.1f}°.",
+        camera_height = 0.2
+        camera_offset = np.array([0.0, 0.0, camera_height])
+        camera_origin = robot_pos + camera_offset
+        heading = np.array([math.cos(self._yaw), math.sin(self._yaw), 0.0])
+        camera_target = camera_origin + heading
+        view_matrix = p.computeViewMatrix(
+            cameraEyePosition=camera_origin.tolist(),
+            cameraTargetPosition=camera_target.tolist(),
+            cameraUpVector=[0.0, 0.0, 1.0],
+        )
+
+        aspect_ratio = 1.0
+        near_val = 0.02
+        far_val = 5.0
+        projection_matrix = p.computeProjectionMatrixFOV(
+            fov=fov_degrees,
+            aspect=aspect_ratio,
+            nearVal=near_val,
+            farVal=far_val,
+        )
+
+        width = 128
+        height = 128
+        renderer = (
+            p.ER_BULLET_HARDWARE_OPENGL if self._use_gui else p.ER_TINY_RENDERER
+        )
+        _, _, rgb_data, depth_data, _ = p.getCameraImage(
+            width,
+            height,
+            viewMatrix=view_matrix,
+            projectionMatrix=projection_matrix,
+            renderer=renderer,
+        )
+
+        rgb_array = np.reshape(rgb_data, (height, width, 4)).astype(np.uint8)[..., :3]
+        depth_buffer = np.array(depth_data, dtype=np.float32).reshape(height, width)
+        depth_meters = self._depth_buffer_to_meters(depth_buffer, near_val, far_val)
+
+        grid_size = 8
+        block_h = height // grid_size
+        block_w = width // grid_size
+        trimmed_rgb = rgb_array[
+            : grid_size * block_h, : grid_size * block_w
         ]
+        block_means = trimmed_rgb.reshape(
+            grid_size, block_h, grid_size, block_w, 3
+        ).mean(axis=(1, 3))
+        label_grid = [
+            [self._color_label(block_means[row, col]) for col in range(grid_size)]
+            for row in range(grid_size)
+        ]
+        grid_lines = ["".join(row) for row in label_grid]
+        label_counts = Counter(label for row in label_grid for label in row)
+        counts_summary = ", ".join(
+            f"{label}:{count}" for label, count in sorted(label_counts.items())
+        )
 
-        fov_radians = math.radians(max(min(fov_degrees, 180.0), 1.0))
-        half_fov = fov_radians / 2
-        detected: List[str] = []
+        summary_lines = [
+            "Camera snapshot captured via RGB-D sensor.",
+            (
+                f"Robot pose -> position {robot_pos.round(3).tolist()}, "
+                f"heading {math.degrees(self._yaw):.1f}°."
+            ),
+            (
+                "Scene objects include red and blue balls plus a blue cube. "
+                "All decisions must rely on the camera output."
+            ),
+            "Color grid (legend: R=red, B=blue, G=green, C=cyan, M=magenta, Y=yellow, "
+            "W=bright, K=dark, O=other):",
+        ]
+        summary_lines.extend(f"   {line}" for line in grid_lines)
+        summary_lines.append(
+            f"Color counts: {counts_summary if counts_summary else 'none'}"
+        )
 
-        for color, body_id in self.balls.items():
-            ball_pos, _ = p.getBasePositionAndOrientation(body_id)
-            ball_arr = np.array(ball_pos)
-            distance = float(np.linalg.norm(ball_arr[:2] - robot_pos[:2]))
-            bearing = self._angle_to_ball(ball_arr)
-            relative = self._normalize_angle(bearing - self._yaw)
-
-            if abs(relative) <= half_fov:
-                detected.append(color)
-                visibility_note = (
-                    " within reach!" if distance < 0.2 else ""
-                )
-                summary_lines.append(
-                    f"{color.title()} ball detected at distance {distance:.2f}m (bearing {math.degrees(relative):.1f}°){visibility_note}."
-                )
-            else:
-                summary_lines.append(
-                    f"{color.title()} ball outside view (distance {distance:.2f}m, bearing {math.degrees(relative):.1f}°)."
-                )
-
-        if not detected:
+        finite_depth = depth_meters[np.isfinite(depth_meters)]
+        if finite_depth.size:
             summary_lines.append(
-                "No balls currently visible. Consider turning to search for the target."
+                (
+                    "Depth statistics (meters): min "
+                    f"{finite_depth.min():.2f}, mean {finite_depth.mean():.2f}, "
+                    f"max {finite_depth.max():.2f}."
+                )
             )
         else:
+            summary_lines.append("Depth statistics unavailable (no valid depth samples).")
+
+        target_object = (target_object or "").strip()
+        if not target_object:
             summary_lines.append(
-                "Visible balls detected. Move forward to reduce the distance to the desired target."
+                "No target specified. Provide `target_object` to trigger vision analysis."
             )
+            return "\n".join(summary_lines)
+
+        if self._vision_llm is None:
+            summary_lines.append(
+                "Vision language model is not configured; cannot analyze target visibility."
+            )
+            return "\n".join(summary_lines)
+
+        grid_text = "\n".join(grid_lines)
+        counts_text = counts_summary if counts_summary else "none"
+        detection_prompt = (
+            "You analyze a coarse color grid derived from a robot-mounted camera. "
+            "Determine whether the specified target object is visible. Respond with "
+            "'yes', 'no', or 'uncertain' on the first line, followed by a brief "
+            "justification."
+            f"\nTarget object: {target_object}."
+            "\nGrid legend: R=red, B=blue, G=green, C=cyan, M=magenta, Y=yellow, W=bright, K=dark, O=other."
+            f"\nColor counts: {counts_text}."
+            "\nGrid (top row = left-to-right across the forward view):\n"
+            f"{grid_text}"
+        )
+
+        try:
+            response = self._vision_llm.invoke(
+                [
+                    SystemMessage(
+                        content=(
+                            "You are a concise vision classifier. Decide if the target object is visible "
+                            "based on the provided color grid and counts."
+                        )
+                    ),
+                    HumanMessage(content=detection_prompt),
+                ]
+            )
+            detection_text = (
+                response.content
+                if isinstance(response.content, str)
+                else str(response.content)
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            detection_text = f"Vision model call failed: {exc}"
+
+        summary_lines.append(
+            f"Vision model assessment for '{target_object}': {detection_text.strip()}"
+        )
 
         return "\n".join(summary_lines)
 
@@ -356,15 +496,17 @@ def build_tools(sim: BulletSimulation):
         return sim.turn(angle_degrees)
 
     @tool
-    def capture_and_detect_image() -> str:
-        """Capture a camera image and report which balls are visible."""
+    def capture_and_detect_image(target_object: str) -> str:
+        """Capture a camera image and ask whether ``target_object`` is visible."""
 
-        return sim.capture_and_detect()
+        return sim.capture_and_detect(target_object=target_object)
 
     return [move_forward, turn, capture_and_detect_image]
 
 
 def build_agent(sim: BulletSimulation, action_delay: float = 0.0):
+    vision_llm = create_llm()
+    sim.set_detection_llm(vision_llm)
     llm = create_llm()
     tools = build_tools(sim)
     tool_map = {tool.name: tool for tool in tools}
@@ -372,14 +514,15 @@ def build_agent(sim: BulletSimulation, action_delay: float = 0.0):
 
     system_message = SystemMessage(
         content=(
-            "You control a cube robot in a PyBullet world containing red and blue balls. "
+            "You control a cube robot in a PyBullet world containing red and blue balls and a blue cube. "
             "Only three tools are available: ``turn`` (rotate by a degree value), ``move_forward`` "
-            "(advance exactly 0.5m), and ``capture_and_detect_image`` (take a camera snapshot "
-            "and report which balls are visible). When asked to approach a specific ball, first "
-            "capture images until the desired ball is visible. If it is not visible, continue "
-            "turning in place. Once the target ball enters the camera frame, alternate between "
-            "capturing images and moving forward until the robot is very close (distance below "
-            "0.2m). Provide concise progress updates throughout."
+            "(advance exactly 0.5m), and ``capture_and_detect_image`` (capture an RGB-D camera frame). "
+            "Always call ``capture_and_detect_image`` with a ``target_object`` argument such as 'red ball', "
+            "'blue ball', or 'blue cube'. The tool returns raw sensor summaries plus a vision-model "
+            "judgement that must guide your decisions. Do not rely on hidden world knowledge—plan solely "
+            "from camera observations. If the target is not yet visible, keep turning and capturing images. "
+            "Once the target appears, alternate between capturing images and moving forward until you are "
+            "very close (within roughly 0.2m). Provide concise progress updates throughout."
         )
     )
 
