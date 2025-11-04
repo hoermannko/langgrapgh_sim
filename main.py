@@ -7,6 +7,7 @@ high-level goals provided by the user via the command line.
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import os
 import time
@@ -25,21 +26,12 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-
-from langgraph.graph import END, START, StateGraph
-
-
-PLAN_TEMPLATE = (
-    "Goal: {goal}\n"
-    "Target: {target}\n"
-    "Plan:\n"
-    "1. Identify the {target} ball\n"
-    "2. Move to the {target} ball"
-
-)
 from langchain_core.tools import tool
 from langchain_openai import AzureChatOpenAI
 from langgraph.graph import END, START, StateGraph
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class AgentState:
@@ -270,8 +262,14 @@ def build_agent(sim: BulletSimulation):
     graph = StateGraph(AgentState)
 
     def agent_node(state: AgentState) -> AgentState:
+        logger.info("Agent node invoked with %d messages", len(state.messages))
         response = llm_with_tools.invoke(state.messages)
         requires_action = bool(getattr(response, "tool_calls", None))
+        logger.info(
+            "Agent response received. requires_action=%s tool_calls=%s",
+            requires_action,
+            getattr(response, "tool_calls", []),
+        )
         messages = state.messages + [response]
         return AgentState(
             goal=state.goal,
@@ -288,14 +286,17 @@ def build_agent(sim: BulletSimulation):
         tool_messages: List[BaseMessage] = []
         for call in last_message.tool_calls:
             tool_name = call["name"]
+            logger.info("Executing tool '%s' with args=%s", tool_name, call.get("args"))
             if tool_name not in tool_map:
                 content = f"Tool '{tool_name}' not found."
             else:
                 tool_executor = tool_map[tool_name]
                 try:
                     content = tool_executor.invoke(call["args"])
+                    logger.info("Tool '%s' completed with result: %s", tool_name, content)
                 except Exception as exc:  # pragma: no cover - defensive logging
                     content = f"Tool '{tool_name}' failed: {exc}"
+                    logger.exception("Tool '%s' failed", tool_name)
             tool_messages.append(
                 ToolMessage(content=content, tool_call_id=call["id"], name=tool_name)
             )
@@ -330,7 +331,20 @@ def build_agent(sim: BulletSimulation):
             )
         else:
             initial_state = state
-        return app.invoke(initial_state)
+        logger.info("Starting agent run for goal: %s", initial_state.goal)
+        result = app.invoke(initial_state)
+        if isinstance(result, dict):
+            logger.info("Agent returned a raw dict; converting to AgentState")
+            result = AgentState(**result)
+        elif not isinstance(result, AgentState):
+            raise TypeError(f"Unexpected agent result type: {type(result)!r}")
+        logger.info(
+            "Agent run complete. messages=%d requires_action=%s done=%s",
+            len(result.messages),
+            result.requires_action,
+            result.done,
+        )
+        return result
 
     invoke.__doc__ = "Run the compiled graph while ensuring system instructions are present."
 
@@ -345,6 +359,10 @@ def build_agent(sim: BulletSimulation):
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(description="LangGraph controlled PyBullet demo")
     parser.add_argument(
         "--gui",
@@ -359,10 +377,12 @@ def main() -> None:
     except EnvironmentError as exc:
         sim.close()
         print("Azure OpenAI configuration error:", exc)
+        logger.error("Azure OpenAI configuration error: %s", exc)
         return
 
     print("PyBullet simulation ready. Type a goal such as 'approach the red ball'.")
     print("Type 'quit' or press Ctrl+C to exit.\n")
+    logger.info("Simulation initialized. Awaiting user goals.")
 
     try:
         while True:
@@ -372,6 +392,7 @@ def main() -> None:
             if goal.lower() in {"quit", "exit"}:
                 break
 
+            logger.info("Processing goal: %s", goal)
             state = AgentState(goal=goal)
             final_state = agent.invoke(state)
 
@@ -385,10 +406,13 @@ def main() -> None:
                     if isinstance(message.content, str) and message.content.strip():
                         print(f"Assistant: {message.content.strip()}")
             print()
+            logger.info("Goal processing complete. Total messages: %d", len(final_state.messages))
     except (KeyboardInterrupt, EOFError):
         print("\nExiting...")
+        logger.info("Shutdown requested by user.")
     finally:
         sim.close()
+        logger.info("Simulation closed.")
 
 
 if __name__ == "__main__":
