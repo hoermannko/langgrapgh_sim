@@ -343,7 +343,7 @@ def build_tools(sim: BulletSimulation):
     return [move_forward, turn, capture_and_detect_image]
 
 
-def build_agent(sim: BulletSimulation):
+def build_agent(sim: BulletSimulation, action_delay: float = 0.0):
     llm = create_llm()
     tools = build_tools(sim)
     tool_map = {tool.name: tool for tool in tools}
@@ -397,6 +397,8 @@ def build_agent(sim: BulletSimulation):
                 try:
                     content = tool_executor.invoke(call["args"])
                     logger.info("Tool '%s' completed with result: %s", tool_name, content)
+                    if action_delay > 0:
+                        time.sleep(action_delay)
                 except Exception as exc:  # pragma: no cover - defensive logging
                     content = f"Tool '{tool_name}' failed: {exc}"
                     logger.exception("Tool '%s' failed", tool_name)
@@ -472,11 +474,20 @@ def main() -> None:
         action="store_true",
         help="Launch the simulation with the PyBullet GUI (if available).",
     )
+    parser.add_argument(
+        "--action-delay",
+        type=float,
+        default=0.0,
+        help="Seconds to pause after each agent action (tool execution).",
+    )
     args = parser.parse_args()
 
     sim = BulletSimulation(use_gui=args.gui)
     try:
-        agent = build_agent(sim)
+        delay = max(args.action_delay, 0.0)
+        if delay and not args.gui:
+            logger.info("Action delay of %.2fs enabled for CLI mode.", delay)
+        agent = build_agent(sim, action_delay=delay)
     except EnvironmentError as exc:
         sim.close()
         print("Azure OpenAI configuration error:", exc)
