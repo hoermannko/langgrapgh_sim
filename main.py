@@ -16,12 +16,24 @@ from typing import Dict, List, Literal
 import numpy as np
 import pybullet as p
 import pybullet_data
+
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
+
+from langgraph.graph import END, START, StateGraph
+
+
+PLAN_TEMPLATE = (
+    "Goal: {goal}\n"
+    "Target: {target}\n"
+    "Plan:\n"
+    "1. Identify the {target} ball\n"
+    "2. Move to the {target} ball"
+
 )
 from langchain_core.tools import tool
 from langchain_openai import AzureChatOpenAI
