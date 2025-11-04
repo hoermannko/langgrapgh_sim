@@ -57,9 +57,11 @@ class BulletSimulation:
         self.robot_id = self._create_robot()
         self.balls = self._create_balls()
         self._yaw = 0.0
+        self._heading_marker_id: int | None = None
 
         self._time_step = 1.0 / 120.0
         p.setTimeStep(self._time_step)
+        self._update_heading_marker()
 
     def _create_robot(self) -> int:
         half_extents = [0.1, 0.1, 0.1]
@@ -140,6 +142,7 @@ class BulletSimulation:
                 evaluations.append(
                     f"Step {step_index}: Goal already satisfied. {self.evaluate_scene()}"
                 )
+                evaluations.append("Task completed successfully: target reached.")
                 return True, evaluations
 
             direction = planar_delta / max(distance, 1e-6)
@@ -153,6 +156,7 @@ class BulletSimulation:
                 new_position.tolist(),
                 p.getQuaternionFromEuler([0, 0, self._yaw]),
             )
+            self._update_heading_marker()
             p.stepSimulation()
 
             if self._use_gui:
@@ -167,6 +171,7 @@ class BulletSimulation:
             )
 
             if remaining < tolerance:
+                evaluations.append("Task completed successfully: target reached.")
                 return True, evaluations
 
         evaluations.append(
@@ -223,6 +228,7 @@ class BulletSimulation:
         position = self.get_robot_position()
         orientation = p.getQuaternionFromEuler([0.0, 0.0, self._yaw])
         p.resetBasePositionAndOrientation(self.robot_id, position.tolist(), orientation)
+        self._update_heading_marker()
         p.stepSimulation()
         return f"Turned to heading {math.degrees(self._yaw):.1f} degrees."
 
@@ -248,6 +254,25 @@ class BulletSimulation:
     @staticmethod
     def _normalize_angle(angle: float) -> float:
         return (angle + math.pi) % (2 * math.pi) - math.pi
+
+    def _update_heading_marker(self) -> None:
+        """Display a visual indicator showing the robot's forward direction."""
+
+        if self._heading_marker_id is not None:
+            p.removeUserDebugItem(self._heading_marker_id)
+
+        position = self.get_robot_position()
+        heading_vector = np.array([math.cos(self._yaw), math.sin(self._yaw), 0.0])
+        marker_length = 0.4
+        start = position
+        end = position + heading_vector * marker_length
+        self._heading_marker_id = p.addUserDebugLine(
+            start.tolist(),
+            end.tolist(),
+            lineColorRGB=[0.9, 0.1, 0.1],
+            lineWidth=3.0,
+            lifeTime=0.0,
+        )
 
     def capture_and_detect(self, fov_degrees: float = 60.0) -> str:
         """Capture a virtual camera image and report visible balls."""
