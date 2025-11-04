@@ -111,23 +111,43 @@ class BulletSimulation:
         position, _ = p.getBasePositionAndOrientation(self.balls[color])
         return np.array(position)
 
-    def move_robot_towards(self, target: np.ndarray, tolerance: float = 0.05) -> bool:
-        """Move the robot towards ``target`` using a kinematic controller."""
+    def move_robot_towards(
+        self,
+        target: np.ndarray,
+        tolerance: float = 0.05,
+        step_distance: float = 0.1,
+    ) -> tuple[bool, List[str]]:
+        """Move the robot towards ``target`` in fixed increments.
+
+        The robot advances a fixed planar distance on every iteration and performs a
+        scene evaluation after each move to determine whether the goal position has
+        been reached.
+        """
+
+        if step_distance <= 0:
+            raise ValueError("step_distance must be positive")
 
         max_steps = 600
-        speed = 1.2  # meters per second
+        evaluations: List[str] = []
 
-        for _ in range(max_steps):
+        for step_index in range(1, max_steps + 1):
             current = self.get_robot_position()
             delta = target - current
-            distance = np.linalg.norm(delta[:2])
+            planar_delta = delta[:2]
+            distance = np.linalg.norm(planar_delta)
 
             if distance < tolerance:
-                return True
+                evaluations.append(
+                    f"Step {step_index}: Goal already satisfied. {self.evaluate_scene()}"
+                )
+                return True, evaluations
 
-            direction = delta[:2] / max(distance, 1e-6)
-            step_xy = direction * speed * self._time_step
-            new_position = np.array([current[0] + step_xy[0], current[1] + step_xy[1], current[2]])
+            direction = planar_delta / max(distance, 1e-6)
+            travel = min(step_distance, distance)
+            step_xy = direction * travel
+            new_position = np.array(
+                [current[0] + step_xy[0], current[1] + step_xy[1], current[2]]
+            )
             p.resetBasePositionAndOrientation(
                 self.robot_id,
                 new_position.tolist(),
@@ -138,15 +158,33 @@ class BulletSimulation:
             if self._use_gui:
                 time.sleep(self._time_step)
 
-        return False
+            # Evaluate the scene after each discrete movement.
+            evaluation = self.evaluate_scene()
+            remaining = np.linalg.norm((target - new_position)[:2])
+            status = "finished" if remaining < tolerance else "in progress"
+            evaluations.append(
+                f"Step {step_index}: {evaluation} | Task {status}."
+            )
+
+            if remaining < tolerance:
+                return True, evaluations
+
+        evaluations.append(
+            f"Movement halted after {max_steps} steps without reaching the target."
+        )
+        return False, evaluations
 
     def move_relative(self, delta: np.ndarray) -> str:
         current = self.get_robot_position()
         target = current + np.array([delta[0], delta[1], 0.0])
-        arrived = self.move_robot_towards(target)
+        arrived, evaluations = self.move_robot_towards(target)
+        summary_lines = []
         if arrived:
-            return f"Moved to {target.round(3).tolist()}"
-        return "Movement incomplete within allotted steps"
+            summary_lines.append(f"Moved to {target.round(3).tolist()}")
+        else:
+            summary_lines.append("Movement incomplete within allotted steps")
+        summary_lines.extend(evaluations)
+        return "\n".join(summary_lines)
 
     def move_direction(self, direction: str, distance: float) -> str:
         if distance <= 0:
