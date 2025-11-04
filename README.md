@@ -41,6 +41,8 @@ Then start the simulator:
 python main.py        # add --gui if you want the PyBullet GUI
 ```
 
+Pass `--action-delay <seconds>` to pause briefly after each agent tool execution.
+
 Pass `--gui` to launch the PyBullet GUI (if your environment supports it).
 
 Once the program starts you can type instructions such as:
