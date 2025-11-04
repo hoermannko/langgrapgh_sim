@@ -165,10 +165,6 @@ class BulletSimulation:
             # Evaluate the scene after each discrete movement.
             evaluation = self.evaluate_scene()
             remaining = np.linalg.norm((target - new_position)[:2])
-            status = "finished" if remaining < tolerance else "in progress"
-            evaluations.append(
-                f"Step {step_index}: {evaluation} | Task {status}."
-            )
 
             if remaining < tolerance:
                 evaluations.append("Task completed successfully: target reached.")
