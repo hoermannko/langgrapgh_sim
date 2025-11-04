@@ -464,7 +464,13 @@ def build_tools(sim: BulletSimulation):
     return [move_forward, turn, capture_and_detect_image]
 
 
-def build_agent(sim: BulletSimulation, action_delay: float = 0.0):
+def build_agent(
+    sim: BulletSimulation,
+    action_delay: float = 0.0,
+    recursion_limit: int = 100,
+):
+    if recursion_limit <= 0:
+        raise ValueError("recursion_limit must be a positive integer")
     vision_llm = create_llm()
     sim.set_detection_llm(vision_llm)
     llm = create_llm()
@@ -561,7 +567,7 @@ def build_agent(sim: BulletSimulation, action_delay: float = 0.0):
         else:
             initial_state = state
         logger.info("Starting agent run for goal: %s", initial_state.goal)
-        result = app.invoke(initial_state)
+        result = app.invoke(initial_state, config={"recursion_limit": recursion_limit})
         if isinstance(result, dict):
             logger.info("Agent returned a raw dict; converting to AgentState")
             result = AgentState(**result)
