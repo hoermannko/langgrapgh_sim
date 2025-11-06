@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>dual_camera_bot</name>
+  <version>0.1.0</version>
+  <description>Gazebo simulation assets for a differential drive robot with RGB and 360 cameras.</description>
+  <maintainer email="example@example.com">Simulation Maintainer</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>gazebo_ros</depend>
+  <depend>ros2launch</depend>
+  <depend>robot_state_publisher</depend>
+  <depend>xacro</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
