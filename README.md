@@ -43,6 +43,7 @@ cd ~/ros2_ws/src
 git clone https://github.com/your-user/langgrapgh_sim.git
 cd ~/ros2_ws
 rosdep install --rosdistro <your-distro> --from-paths src --ignore-src -r -y
+
 # If you are working inside a Python virtual environment, also install catkin_pkg there
 python -m pip install --upgrade pip catkin_pkg
 colcon build --packages-select dual_camera_bot
@@ -52,6 +53,7 @@ source install/setup.bash
 > **Tip:** sourcing your ROS 2 setup script (or manually exporting `ROS_DISTRO`) before running
 > `rosdep` ensures that keys such as `ament_cmake`, `ament_lint_auto`, and `rosidl_default_generators`
 > resolve correctly on fresh machines.
+
 
 > **Why install `catkin_pkg`?** When `colcon build` invokes the `ament_cmake_core` tooling it relies on
 > Python's `catkin_pkg` module. On systems where ROS 2 is installed via Debian packages this dependency
