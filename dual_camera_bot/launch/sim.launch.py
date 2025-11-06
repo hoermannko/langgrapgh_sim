@@ -37,7 +37,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     robot_name = LaunchConfiguration("robot_name")
 
-    robot_description = Command(["xacro", model])
+    robot_description = Command(["xacro", " ", model])
 
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
