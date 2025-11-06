@@ -37,12 +37,12 @@ The Gazebo portion assumes you have a ROS 2 distribution (Humble or newer) with
 workspace and clone this repository into its `src` directory:
 
 ```bash
-source /opt/ros/<your-distro>/setup.bash  # e.g. /opt/ros/humble/setup.bash
+source /opt/ros/humble/setup.bash  # e.g. /opt/ros/humble/setup.bash
 mkdir -p ~/ros2_ws/src
 cd ~/ros2_ws/src
-git clone https://github.com/your-user/langgrapgh_sim.git
+git clone https://github.com/hoermannko/langgrapgh_sim.git
 cd ~/ros2_ws
-rosdep install --rosdistro <your-distro> --from-paths src --ignore-src -r -y
+rosdep install --rosdistro humble --from-paths src --ignore-src -r -y
 colcon build --packages-select dual_camera_bot
 source install/setup.bash
 ```
