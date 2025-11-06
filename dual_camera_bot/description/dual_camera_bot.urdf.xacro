@@ -289,7 +289,7 @@
           <p2>0.0</p2>
         </distortion>
       </camera>
-      <plugin name="panorama_camera_controller" filename="libgazebo_ros_fisheye_camera.so">
+      <plugin name="panorama_camera_controller" filename="libgazebo_ros_camera.so">
         <ros>
           <namespace>/dual_camera_bot</namespace>
           <remapping>image:=panorama/image_raw</remapping>
